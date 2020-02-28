@@ -16,6 +16,9 @@ Follow the official instructions [here](https://docs.docker.com/compose/install/
 git clone https://github.com/google/timesketch.git
 cd timesketch
 ```
+### Verify the Kernel Settings
+Follow the official instructions [here](https://www.elastic.co/guide/en/elasticsearch/reference/6.4/docker.html#docker-cli-run-prod-mode)
+
 ### Build and Start Containers
 
 ```shell
@@ -40,6 +43,21 @@ The timesketch docker config is set to write all data to the host filesystem, no
 - neo4j: /var/lib/neo4j/data
 - postgres: /var/lib/postgresql
 - redis: /var/lib/redis
+
+#### Mac
+
+On mac, you can set up the shares as following
+
+```shell
+sudo mkdir -p /var/lib/neo4j/data
+sudo chown `whoami` /var/lib/neo4j/data
+sudo mkdir -p /var/lib/elasticsearch
+sudo chown `whoami` /var/lib/elasticsearch
+sudo mkdir -p /var/lib/postgresql/data
+sudo chown `whoami` /var/lib/postgresql/data
+sudo mkdir -p /var/lib/redis
+sudo chown `whoami` /var/lib/redis
+```
 
 These locations on the host filesystem can be backed with any storage mechanism to persist sketch data beyond the container lifetimes.
 

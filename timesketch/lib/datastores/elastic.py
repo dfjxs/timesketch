@@ -19,12 +19,14 @@ from collections import Counter
 import codecs
 import json
 import logging
+import socket
 
 from uuid import uuid4
 
 import six
 
 from elasticsearch import Elasticsearch
+from elasticsearch.exceptions import ConnectionTimeout
 from elasticsearch.exceptions import NotFoundError
 # pylint: disable=redefined-builtin
 from elasticsearch.exceptions import ConnectionError
@@ -81,24 +83,31 @@ class ElasticsearchDataStore(object):
         self.import_events = []
 
     @staticmethod
-    def _build_label_query(sketch_id, label_name):
+    def _build_labels_query(sketch_id, labels):
         """Build Elasticsearch query for Timesketch labels.
 
         Args:
             sketch_id: Integer of sketch primary key.
-            label_name: Name of the label to search for.
+            labels: List of label names.
 
         Returns:
             Elasticsearch query as a dictionary.
         """
-        query_dict = {
-            'query': {
+        label_query = {
+            'bool': {
+                'should': [],
+                "minimum_should_match": 1
+            }
+        }
+
+        for label in labels:
+            nested_query = {
                 'nested': {
                     'query': {
                         'bool': {
                             'must': [{
                                 'term': {
-                                    'timesketch_label.name': label_name
+                                    'timesketch_label.name': label
                                 }
                             }, {
                                 'term': {
@@ -110,8 +119,8 @@ class ElasticsearchDataStore(object):
                     'path': 'timesketch_label'
                 }
             }
-        }
-        return query_dict
+            label_query['bool']['should'].append(nested_query)
+        return label_query
 
     @staticmethod
     def _build_events_query(events):
@@ -127,30 +136,7 @@ class ElasticsearchDataStore(object):
         query_dict = {'query': {'ids': {'values': events_list}}}
         return query_dict
 
-    @staticmethod
-    def _build_field_aggregator(field_name):
-        """Build Elasticsearch query for aggregation based on field.
-
-        Args:
-            field_name: Field to aggregate.
-
-        Returns:
-            Elasticsearch aggregation as a dictionary.
-        """
-        field_aggregation = {
-            'field_aggregation': {
-                'terms': {
-                    'field': '{0:s}.keyword'.format(field_name)
-                }
-            }
-        }
-        return field_aggregation
-
-    def build_query(self,
-                    sketch_id,
-                    query_string,
-                    query_filter,
-                    query_dsl,
+    def build_query(self, sketch_id, query_string, query_filter, query_dsl=None,
                     aggregations=None):
         """Build Elasticsearch DSL query.
 
@@ -164,68 +150,115 @@ class ElasticsearchDataStore(object):
         Returns:
             Elasticsearch DSL query as a dictionary
         """
-        if not query_dsl:
-            if query_filter.get('star', None):
-                query_dsl = self._build_label_query(sketch_id, '__ts_star')
 
-            if query_filter.get('events', None):
-                events = query_filter['events']
-                query_dsl = self._build_events_query(events)
-
-            if not query_dsl:
-                query_dsl = {
-                    'query': {
-                        'bool': {
-                            'must': [{
-                                'query_string': {
-                                    'query': query_string
-                                }
-                            }]
-                        }
-                    }
-                }
-            if query_filter.get('time_start', None):
-                # TODO(jberggren): Add support for multiple time ranges.
-                query_dsl['query']['bool']['filter'] = {
-                    'bool': {
-                        'should': [{
-                            'range': {
-                                'datetime': {
-                                    'gte': query_filter['time_start'],
-                                    'lte': query_filter['time_end']
-                                }
-                            }
-                        }]
-                    }
-                }
-            if query_filter.get('from', None):
-                query_dsl['from'] = query_filter['from']
-            if query_filter.get('size', None):
-                query_dsl['size'] = query_filter['size']
-            if query_filter.get('exclude', None):
-                query_dsl['post_filter'] = {
-                    'bool': {
-                        'must_not': {
-                            'terms': {
-                                'data_type': query_filter['exclude']
-                            }
-                        }
-                    }
-                }
-        else:
+        if query_dsl:
             query_dsl = json.loads(query_dsl)
+            # Remove any aggregation coming from user supplied Query DSL.
+            # We have no way to display this data in a good way today.
+            if query_dsl.get('aggregations', None):
+                del query_dsl['aggregations']
+            return query_dsl
+
+        if query_filter.get('events', None):
+            events = query_filter['events']
+            return self._build_events_query(events)
+
+        query_dsl = {
+            'query': {
+                'bool': {
+                    'must': [],
+                    'must_not': [],
+                    'filter': []
+                }
+            }
+        }
+
+        # TODO: Remove when old UI has been deprecated.
+        if query_filter.get('star', None):
+            label_query = self._build_labels_query(sketch_id, ['__ts_star'])
+            query_string = '*'
+            query_dsl['query']['bool']['must'].append(label_query)
+
+        # TODO: Remove when old UI has been deprecated.
+        if query_filter.get('time_start', None):
+            query_dsl['query']['bool']['filter'] = [{
+                'bool': {
+                    'should': [{
+                        'range': {
+                            'datetime': {
+                                'gte': query_filter['time_start'],
+                                'lte': query_filter['time_end']
+                            }
+                        }
+                    }]
+                }
+            }]
+
+        if query_string:
+            query_dsl['query']['bool']['must'].append(
+                {'query_string': {'query': query_string}})
+
+        # New UI filters
+        if query_filter.get('chips', None):
+            labels = []
+            must_filters = query_dsl['query']['bool']['must']
+            must_not_filters = query_dsl['query']['bool']['must_not']
+            datetime_ranges = {
+                'bool': {
+                    'should': [],
+                    "minimum_should_match": 1
+                }
+            }
+
+            for chip in query_filter['chips']:
+                if chip['type'] == 'label':
+                    labels.append(chip['value'])
+
+                elif chip['type'] == 'term':
+                    term_filter = {
+                        'match_phrase': {
+                            '{}'.format(chip['field']): {
+                                'query': "{}".format(chip['value'])
+                            }
+                        }
+                    }
+
+                    if chip['operator'] == 'must':
+                        must_filters.append(term_filter)
+
+                    elif chip['operator'] == 'must_not':
+                        must_not_filters.append(term_filter)
+
+                elif chip['type'] == 'datetime_range':
+                    start = chip['value'].split(',')[0]
+                    end = chip['value'].split(',')[1]
+                    range_filter = {
+                        'range': {
+                            'datetime': {
+                                'gte': start,
+                                'lte': end
+                            }
+                        }
+                    }
+                    datetime_ranges['bool']['should'].append(range_filter)
+
+            label_filter = self._build_labels_query(sketch_id, labels)
+            must_filters.append(label_filter)
+            must_filters.append(datetime_ranges)
+
+        # Pagination
+        if query_filter.get('from', None):
+            query_dsl['from'] = query_filter['from']
+
+        # Number of events to return
+        if query_filter.get('size', None):
+            query_dsl['size'] = query_filter['size']
 
         # Make sure we are sorting.
         if not query_dsl.get('sort', None):
             query_dsl['sort'] = {
                 'datetime': query_filter.get('order', 'asc')
             }
-
-        # Remove any aggregation coming from user supplied Query DSL. We have
-        # no way to display this data in a good way today.
-        # TODO: Revisit this and figure out if we can display the data.
-        if query_dsl.get('aggregations', None):
-            del query_dsl['aggregations']
 
         # Add any pre defined aggregations
         if aggregations:
@@ -236,17 +269,11 @@ class ElasticsearchDataStore(object):
                     'post_filter']
                 query_dsl.pop('post_filter', None)
             query_dsl['aggregations'] = aggregations
+
         return query_dsl
 
-    def search(self,
-               sketch_id,
-               query_string,
-               query_filter,
-               query_dsl,
-               indices,
-               count=False,
-               aggregations=None,
-               return_fields=None,
+    def search(self, sketch_id, query_string, query_filter, query_dsl, indices,
+               count=False, aggregations=None, return_fields=None,
                enable_scroll=False):
         """Search ElasticSearch. This will take a query string from the UI
         together with a filter definition. Based on this it will execute the
@@ -306,19 +333,29 @@ class ElasticsearchDataStore(object):
                 search_type=search_type,
                 scroll=scroll_timeout)
 
-        # Suppress the lint error because elasticsearch-py adds parameters
-        # to the function with a decorator and this makes pylint sad.
+        # The argument " _source_include" changed to "_source_includes" in
+        # ES version 7. This check add support for both version 6 and 7 clients.
         # pylint: disable=unexpected-keyword-arg
-        return self.client.search(
-            body=query_dsl,
-            index=list(indices),
-            search_type=search_type,
-            _source_include=return_fields,
-            scroll=scroll_timeout)
+        if self.version.startswith('6'):
+            _search_result = self.client.search(
+                body=query_dsl,
+                index=list(indices),
+                search_type=search_type,
+                _source_include=return_fields,
+                scroll=scroll_timeout)
+        else:
+            _search_result = self.client.search(
+                body=query_dsl,
+                index=list(indices),
+                search_type=search_type,
+                _source_includes=return_fields,
+                scroll=scroll_timeout)
 
-    def search_stream(
-            self, sketch_id=None, query_string=None, query_filter=None,
-            query_dsl=None, indices=None, return_fields=None):
+        return _search_result
+
+    def search_stream(self, sketch_id=None, query_string=None,
+                      query_filter=None, query_dsl=None, indices=None,
+                      return_fields=None):
         """Search ElasticSearch. This will take a query string from the UI
         together with a filter definition. Based on this it will execute the
         search request on ElasticSearch and get result back.
@@ -353,6 +390,11 @@ class ElasticsearchDataStore(object):
         scroll_id = result['_scroll_id']
         scroll_size = result['hits']['total']
 
+        # Elasticsearch version 7.x returns total hits as a dictionary.
+        # TODO: Refactor when version 6.x has been deprecated.
+        if isinstance(scroll_size, dict):
+            scroll_size = scroll_size.get('value', 0)
+
         for event in result['hits']['hits']:
             yield event
 
@@ -378,11 +420,21 @@ class ElasticsearchDataStore(object):
             # Suppress the lint error because elasticsearch-py adds parameters
             # to the function with a decorator and this makes pylint sad.
             # pylint: disable=unexpected-keyword-arg
-            return self.client.get(
-                index=searchindex_id,
-                id=event_id,
-                doc_type='_all',
-                _source_exclude=['timesketch_label'])
+            if self.version.startswith('6'):
+                event = self.client.get(
+                    index=searchindex_id,
+                    id=event_id,
+                    doc_type='_all',
+                    _source_exclude=['timesketch_label'])
+            else:
+                event = self.client.get(
+                    index=searchindex_id,
+                    id=event_id,
+                    doc_type='_all',
+                    _source_excludes=['timesketch_label'])
+
+            return event
+
         except NotFoundError:
             abort(HTTP_STATUS_CODE_NOT_FOUND)
 
@@ -475,14 +527,19 @@ class ElasticsearchDataStore(object):
             Document type in string format.
         """
         _document_mapping = {
-            doc_type: {
-                'properties': {
-                    'timesketch_label': {
-                        'type': 'nested'
-                    }
+            'properties': {
+                'timesketch_label': {
+                    'type': 'nested'
+                },
+                'datetime': {
+                    'type': 'date'
                 }
             }
         }
+
+        # TODO: Remove when we deprecate Elasticsearch version 6.x
+        if self.version.startswith('6'):
+            _document_mapping = {doc_type: _document_mapping}
 
         if not self.client.indices.exists(index_name):
             try:
@@ -514,9 +571,8 @@ class ElasticsearchDataStore(object):
                     'Unable to connect to Timesketch backend: {}'.format(e)
                 )
 
-    def import_event(
-            self, index_name, event_type, event=None,
-            event_id=None, flush_interval=DEFAULT_FLUSH_INTERVAL):
+    def import_event(self, index_name, event_type, event=None, event_id=None,
+                     flush_interval=DEFAULT_FLUSH_INTERVAL):
         """Add event to Elasticsearch.
 
         Args:
@@ -541,16 +597,19 @@ class ElasticsearchDataStore(object):
             header = {
                 'index': {
                     '_index': index_name,
-                    '_type': event_type
                 }
             }
             update_header = {
                 'update': {
                     '_index': index_name,
-                    '_type': event_type,
                     '_id': event_id
                 }
             }
+
+            # TODO: Remove when we deprecate Elasticsearch version 6.x
+            if self.version.startswith('6'):
+                header['index']['_type'] = event_type
+                update_header['update']['_type'] = event_type
 
             if event_id:
                 # Event has "lang" defined if there is a script used for import.
@@ -565,12 +624,22 @@ class ElasticsearchDataStore(object):
             self.import_counter['events'] += 1
 
             if self.import_counter['events'] % int(flush_interval) == 0:
-                self.client.bulk(body=self.import_events)
+                try:
+                    self.client.bulk(body=self.import_events)
+                except (ConnectionTimeout, socket.timeout) as e:
+                    # TODO: Add a retry here.
+                    es_logger.error(
+                        'Unable to add events, with error: {0!s}'.format(e))
                 self.import_events = []
         else:
             # Import the remaining events in the queue.
             if self.import_events:
-                self.client.bulk(body=self.import_events)
+                try:
+                    self.client.bulk(body=self.import_events)
+                except (ConnectionTimeout, socket.timeout) as e:
+                    # TODO: Add a retry here.
+                    es_logger.error(
+                        'Unable to add events, with error: {0!s}'.format(e))
 
         return self.import_counter['events']
 

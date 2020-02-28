@@ -178,9 +178,9 @@ class AddSearchIndex(Command):
             sys.exit(1)
         searchindex = SearchIndex(
             name=name, description=name, user=user, index_name=index)
-        searchindex.grant_permission('read')
         db_session.add(searchindex)
         db_session.commit()
+        searchindex.grant_permission('read')
         sys.stdout.write('Search index {0:s} created\n'.format(name))
 
 
@@ -303,6 +303,34 @@ class SearchTemplateManager(Command):
                 db_session.commit()
 
 
+class ListSketches(Command):
+    """List all available sketches."""
+
+    # pylint: disable=arguments-differ, method-hidden
+    def run(self):
+        """The run method for the command."""
+        sketches = Sketch.query.all()
+
+        name_len = max([len(x.name) for x in sketches])
+        desc_len = max([len(x.description) for x in sketches])
+
+        if not name_len:
+            name_len = 5
+        if not desc_len:
+            desc_len = 10
+
+        fmt_string = '{{0:^3d}} | {{1:{0:d}s}} | {{2:{1:d}s}}'.format(
+            name_len, desc_len)
+
+        print('+-'*40)
+        print(' ID | Name {0:s} | Description'.format(' '*(name_len-5)))
+        print('+-'*40)
+        for sketch in sketches:
+            print(fmt_string.format(
+                sketch.id, sketch.name, sketch.description))
+            print('-'*80)
+
+
 class ImportTimeline(Command):
     """Create a new Timesketch timeline from a file."""
     option_list = (
@@ -357,6 +385,9 @@ class ImportTimeline(Command):
                 pass
 
         if not timeline_name:
+            if timeline_name is None:
+                timeline_name = '{0:s}_timeline'.format(filename)
+
             if not isinstance(timeline_name, six.text_type):
                 timeline_name = codecs.decode(timeline_name, 'utf-8')
 
@@ -413,9 +444,11 @@ class ImportTimeline(Command):
 
         # Start Celery pipeline for indexing and analysis.
         # Import here to avoid circular imports.
-        from timesketch.lib import tasks
+        from timesketch.lib import tasks  # pylint: disable=import-outside-toplevel
         pipeline = tasks.build_index_pipeline(
-            file_path, timeline_name, index_name, extension, sketch.id)
+            file_path=file_path, events='', timeline_name=timeline_name,
+            index_name=index_name, file_extension=extension,
+            sketch_id=sketch.id)
         pipeline.apply_async(task_id=index_name)
 
         print('Imported {0:s} to sketch: {1:d} ({2:s})'.format(
@@ -431,6 +464,7 @@ def main():
     shell_manager.add_command('add_index', AddSearchIndex())
     shell_manager.add_command('db', MigrateCommand)
     shell_manager.add_command('drop_db', DropDataBaseTables())
+    shell_manager.add_command('list_sketches', ListSketches())
     shell_manager.add_command('purge', PurgeTimeline())
     shell_manager.add_command('search_template', SearchTemplateManager())
     shell_manager.add_command('import', ImportTimeline())
@@ -440,7 +474,7 @@ def main():
         '-c',
         '--config',
         dest='config',
-        default='/etc/timesketch.conf',
+        default='/etc/timesketch/timesketch.conf',
         required=False)
     shell_manager.run()
 
