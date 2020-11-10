@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Celery task for processing Plaso storage files."""
+"""Celery task for processing Plaso storage or mans files."""
 
 from __future__ import unicode_literals
 
@@ -24,13 +24,18 @@ import io
 import json
 import six
 
+from elasticsearch.exceptions import RequestError
+from flask import current_app
+
 from celery import chain
 from celery import signals
-from flask import current_app
 from sqlalchemy import create_engine
-from elasticsearch.exceptions import RequestError
 
-from timesketch import create_celery_app
+# Disabled until the project can provide a non-ES native import.
+# from mans_to_es import MansToEs
+
+from timesketch.app import configure_logger
+from timesketch.app import create_celery_app
 from timesketch.lib import errors
 from timesketch.lib.analyzers import manager
 from timesketch.lib.datastores.elastic import ElasticsearchDataStore
@@ -45,7 +50,55 @@ from timesketch.models.sketch import Analysis
 from timesketch.models.sketch import AnalysisSession
 from timesketch.models.user import User
 
+
+logger = logging.getLogger('timesketch.tasks')
 celery = create_celery_app()
+
+
+# pylint: disable=unused-argument
+@signals.after_setup_logger.connect
+def setup_loggers(*args, **kwargs):
+    """Configure the logger."""
+    configure_logger()
+
+
+def get_import_errors(error_container, index_name, total_count):
+    """Returns a string with error message or an empty string if no errors.
+
+    Args:
+      error_container: dict with error messages for each index.
+      index_name: string with the search index name.
+      total_count: integer with the total amount of events indexed.
+    """
+    if index_name not in error_container:
+        return ''
+
+    index_dict = error_container[index_name]
+    error_list = index_dict.get('errors', [])
+
+    if not error_list:
+        return ''
+
+    error_count = len(error_list)
+
+    error_types = index_dict.get('types')
+    error_details = index_dict.get('details')
+
+    if error_types:
+        top_type = error_types.most_common()[0][0]
+    else:
+        top_type = 'Unknown Reasons'
+
+    if error_details:
+        top_details = error_details.most_common()[0][0]
+    else:
+        top_details = 'Unknown Reasons'
+
+    return (
+        '{0:d} out of {1:d} events imported. Most common error type '
+        'is "{2:s}" with the detail of "{3:s}"').format(
+            total_count - error_count, total_count,
+            top_type, top_details)
 
 
 class SqlAlchemyTask(celery.Task):
@@ -75,22 +128,24 @@ def _set_timeline_status(index_name, status, error_msg=None):
         status: Status to set.
         error_msg: Error message.
     """
-    searchindex = SearchIndex.query.filter_by(index_name=index_name).first()
-    timelines = Timeline.query.filter_by(searchindex=searchindex).all()
+    searchindices = SearchIndex.query.filter_by(index_name=index_name).all()
 
-    # Set status
-    searchindex.set_status(status)
-    for timeline in timelines:
-        timeline.set_status(status)
-        db_session.add(timeline)
+    for searchindex in searchindices:
+        searchindex.set_status(status)
 
-    # Update description if there was a failure in ingestion
-    if error_msg and status == 'fail':
-        # TODO: Don't overload the description field.
-        searchindex.description = error_msg
+        # Update description if there was a failure in ingestion.
+        if error_msg:
+            # TODO: Don't overload the description field.
+            searchindex.description = error_msg
+
+        db_session.add(searchindex)
+
+        timelines = Timeline.query.filter_by(searchindex=searchindex).all()
+        for timeline in timelines:
+            timeline.set_status(status)
+            db_session.add(timeline)
 
     # Commit changes to database
-    db_session.add(searchindex)
     db_session.commit()
 
 
@@ -110,6 +165,9 @@ def _get_index_task_class(file_extension):
         index_class = run_plaso
     elif file_extension in ['csv', 'jsonl']:
         index_class = run_csv_jsonl
+    # Disabled
+    # elif file_extension == 'mans':
+    #    index_class = run_mans
     else:
         raise KeyError('No task that supports {0:s}'.format(file_extension))
     return index_class
@@ -322,7 +380,7 @@ def run_email_result_task(index_name, sketch_id=None):
         try:
             to_username = searchindex.user.username
         except AttributeError:
-            logging.warning('No user to send email to.')
+            logger.warning('No user to send email to.')
             return ''
 
         if sketch_id:
@@ -376,9 +434,9 @@ def run_index_analyzer(index_name, analyzer_name, **kwargs):
     analyzer = analyzer_class(index_name=index_name, **kwargs)
     result = analyzer.run_wrapper()
     if result:
-        logging.info('[{0:s}] result: {1:s}'.format(analyzer_name, result))
+        logger.info('[{0:s}] result: {1:s}'.format(analyzer_name, result))
     else:
-        logging.info('[{0:s}] return with no results.'.format(analyzer_name))
+        logger.info('[{0:s}] return with no results.'.format(analyzer_name))
     return index_name
 
 
@@ -401,7 +459,7 @@ def run_sketch_analyzer(index_name, sketch_id, analysis_id, analyzer_name,
         sketch_id=sketch_id, index_name=index_name, **kwargs)
 
     result = analyzer.run_wrapper(analysis_id)
-    logging.info('[{0:s}] result: {1:s}'.format(analyzer_name, result))
+    logger.info('[{0:s}] result: {1:s}'.format(analyzer_name, result))
     return index_name
 
 
@@ -423,7 +481,7 @@ def run_plaso(file_path, events, timeline_name, index_name, source_type):
         raise RuntimeError('Plaso uploads needs a file, not events.')
     # Log information to Celery
     message = 'Index timeline [{0:s}] to index [{1:s}] (source: {2:s})'
-    logging.info(message.format(timeline_name, index_name, source_type))
+    logger.info(message.format(timeline_name, index_name, source_type))
 
     try:
         psort_path = current_app.config['PSORT_PATH']
@@ -482,7 +540,7 @@ def run_csv_jsonl(file_path, events, timeline_name, index_name, source_type):
     read_and_validate = validators.get(source_type)
 
     # Log information to Celery
-    logging.info(
+    logger.info(
         'Index timeline [{0:s}] to index [{1:s}] (source: {2:s})'.format(
             timeline_name, index_name, source_type))
 
@@ -492,12 +550,23 @@ def run_csv_jsonl(file_path, events, timeline_name, index_name, source_type):
 
     # Reason for the broad exception catch is that we want to capture
     # all possible errors and exit the task.
+    final_counter = 0
+    error_msg = ''
+    error_count = 0
     try:
         es.create_index(index_name=index_name, doc_type=event_type)
         for event in read_and_validate(file_handle):
             es.import_event(index_name, event_type, event)
+            final_counter += 1
+
         # Import the remaining events
-        es.flush_queued_events()
+        results = es.flush_queued_events()
+
+        error_container = results.get('error_container', {})
+        error_msg = get_import_errors(
+            error_container=error_container,
+            index_name=index_name,
+            total_count=results.get('total_events', 0))
 
     except errors.DataIngestionError as e:
         _set_timeline_status(index_name, status='fail', error_msg=str(e))
@@ -512,10 +581,50 @@ def run_csv_jsonl(file_path, events, timeline_name, index_name, source_type):
         # Mark the searchindex and timelines as failed and exit the task
         error_msg = traceback.format_exc()
         _set_timeline_status(index_name, status='fail', error_msg=error_msg)
-        logging.error('Error: {0!s}\n{1:s}'.format(e, error_msg))
+        logger.error('Error: {0!s}\n{1:s}'.format(e, error_msg))
         return None
 
+    if error_count:
+        logger.info(
+            'Index timeline: [{0:s}] to index [{1:s}] - {2:d} out of {3:d} '
+            'events imported (in total {4:d} errors were discovered) '.format(
+                timeline_name, index_name, (final_counter - error_count),
+                final_counter, error_count))
+    else:
+        logger.info(
+            'Index timeline: [{0:s}] to index [{1:s}] - {2:d} '
+            'events imported.'.format(timeline_name, index_name, final_counter))
+
     # Set status to ready when done
+    _set_timeline_status(index_name, status='ready', error_msg=error_msg)
+
+    return index_name
+
+
+# Disabled until mans_to_es can produce a stream of events instead of doing
+# raw Elasticsearch operations.
+# pylint: disable=pointless-string-statement
+"""
+def run_mans(file_path, events, timeline_name, index_name, source_type):
+    # Log information to Celery
+    message = 'Index timeline [{0:s}] to index [{1:s}] (source: {2:s})'
+    logger.info(message.format(timeline_name, index_name, source_type))
+
+    elastic_host = current_app.config['ELASTIC_HOST']
+    elastic_port = int(current_app.config['ELASTIC_PORT'])
+    try:
+        mte = MansToEs(filename=file_path, name=timeline_name, index=index_name,
+                       es_host=elastic_host, es_port=elastic_port)
+        mte.run()
+    except Exception as e:  # pylint: disable=broad-except
+        # Mark the searchindex and timelines as failed and exit the task
+        error_msg = traceback.format_exc()
+        _set_timeline_status(index_name, status='fail', error_msg=error_msg)
+        logger.error('Error: {0!s}\n{1:s}'.format(e, error_msg))
+        return None
+
+    # Mark the searchindex and timelines as ready
     _set_timeline_status(index_name, status='ready')
 
     return index_name
+"""

@@ -23,6 +23,7 @@ from timesketch.lib.analyzers import expert_sessionizers
 from timesketch.lib.analyzers import feature_extraction
 from timesketch.lib.analyzers import login
 from timesketch.lib.analyzers import phishy_domains
+from timesketch.lib.analyzers import safebrowsing
 from timesketch.lib.analyzers import sessionizer
 from timesketch.lib.analyzers import sigma_tagger
 from timesketch.lib.analyzers import similarity_scorer
@@ -30,3 +31,6 @@ from timesketch.lib.analyzers import ssh_sessionizer
 from timesketch.lib.analyzers import gcp_servicekey
 from timesketch.lib.analyzers import ntfs_timestomp
 from timesketch.lib.analyzers import yetiindicators
+from timesketch.lib.analyzers import win_crash
+from timesketch.lib.analyzers import win_evtxgap
+from timesketch.lib.analyzers import tagger

@@ -126,6 +126,8 @@ class CreateTimelineForm(BaseForm):
 
 class TimelineForm(NameDescriptionForm):
     """Form to edit a timeline."""
+    labels = StringField('Labels', validators=[Optional()])
+    label_action = StringField('LabelAction', validators=[Optional()])
     color = StringField(
         'Color',
         validators=[DataRequired(),
@@ -170,6 +172,7 @@ class ExploreForm(BaseForm):
     enable_scroll = BooleanField(
         'Enable scroll', false_values={False, 'false', ''}, default=False)
     scroll_id = StringField('Scroll ID', default='')
+    file_name = StringField('Export to File')
 
 
 class GraphExploreForm(BaseForm):
@@ -177,16 +180,6 @@ class GraphExploreForm(BaseForm):
     graph_view_id = IntegerField('Query ID')
     parameters = StringField('Parameters')
     output_format = StringField('Output format')
-
-
-class SaveAggregationForm(BaseForm):
-    """Form used to save an aggregation."""
-    name = StringField('Name')
-    description = StringField('Description')
-    agg_type = StringField('Aggregation Type')
-    parameters = StringField('Aggregation parameters')
-    chart_type = StringField('Chart plugin type')
-    view_id = IntegerField('Attach to View')
 
 
 class AggregationExploreForm(BaseForm):
@@ -220,18 +213,13 @@ class TrashViewForm(BaseForm):
     view_id = IntegerField('View ID', validators=[DataRequired()])
 
 
-class EventCreateForm(BaseForm):
-    """Generic form to handle event addition. E.g. message and timestamp."""
-    timestamp = StringField('timestamp', validators=[DataRequired()])
-    timestamp_desc = StringField('timestamp_desc', validators=[DataRequired()])
-    message = StringField('message', validators=[DataRequired()])
-
-
 class EventAnnotationForm(BaseForm):
     """Generic form to handle event annotation. E.g. comment and labels."""
     annotation = StringField('Annotation', validators=[DataRequired()])
     annotation_type = StringField('Type', validators=[DataRequired()])
     events = StringField('Events', validators=[DataRequired()])
+    remove = BooleanField(
+        'Remove', false_values={False, 'false', ''}, default=False)
 
 
 class StoryForm(BaseForm):

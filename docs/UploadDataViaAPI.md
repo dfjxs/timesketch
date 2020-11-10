@@ -1,7 +1,7 @@
 # Create Timeline From Other Sources
 
 Not all data comes in a good [CSV or JSONL
-format](docs/CreateTimelineFromJSONorCSV.md) that can be imported
+format](CreateTimelineFromJSONorCSV.md) that can be imported
 directly into Timesketch. Your data may lie in a SQL database, Excel sheet, or
 even in CSV/JSON but it does not have the correct fields in it. In those cases
 it might be beneficial to have a separate importer in Timesketch that can deal
@@ -23,6 +23,12 @@ The Timesketch importer is to be used for data sources that you've already
 parsed or have readily available, but they are not in the correct format that
 Timesketch requires or you want an automatic way to import the data, or a way to
 built an importer into your already existing toolsets.
+
+This is therefore useful for uploading CSV or JSON files, or through other code
+that processes data to stream to Timesketch. The importer takes in simple
+configuration parameters to make the necessary adjustments to the data so that
+it can be ingested by Timesketch. In the future these adjustments will be
+configurable using a config file, until then a more manual approach is needed.
 
 ## Basics
 
@@ -88,7 +94,7 @@ Timestamp What  URL Results
 
 Here we have a data frame that we may want to add to our Timesketch instance.
 What is missing here are few of the necessary columns, see
-[documentation]((docs/CreateTimelineFromJSONorCSV.md). We don't really need to
+[documentation](CreateTimelineFromJSONorCSV.md). We don't really need to
 add them here, we can do that all in our upload stream. Let's start by
 connecting to a Timesketch instance.
 
@@ -96,7 +102,7 @@ connecting to a Timesketch instance.
 import pandas as pd
 
 from timesketch_api_client import client
-from timesketch_api_client import importer
+from timesketch_import_client import importer
 
 ...
 def action():
@@ -128,7 +134,7 @@ from the network traffic to Timesketch.
 from scapy import all as scapy_all
 ...
 
-packets = scapy_all.rdpcap(fh)
+packets = scapy_all.rdpcap(~/Downloads/SomeRandomDocument.pcap)
 
 with importer.ImportStreamer() as streamer:
   streamer.set_sketch(my_sketch)
@@ -160,7 +166,7 @@ then uploaded to Timesketch.
 
 ## JSON
 
-Adding a JSON entry is identicial to the dict method, except that the each
+Adding a JSON entry is identical to the dict method, except that the each
 entry is stored as a separate JSON object (one entry is only a single line).
 
 Let's look at an example:
@@ -182,8 +188,8 @@ The function `add_file` in the importer is used to add a file.
 Here is an example of how the importer can be used:
 
 ```
-from timesketch_api_client import importer
 from timesketch_api_client import client
+from timesketch_import_client import importer
 
 ...
 
@@ -207,7 +213,7 @@ and the final plaso storage file reassambled.
 
 ```
 from timesketch_api_client import client
-from timesketch_api_client import importer
+from timesketch_import_client import importer
 
 ...
 def action():
